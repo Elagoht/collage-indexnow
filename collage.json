@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/indexnow",
+  "description": "A collage plugin that tells search engines which URLs changed, through the IndexNow protocol: Bing, Yandex, Seznam, Naver and the others that share what one of them is told.",
+  "repository": "https://github.com/Elagoht/collage-indexnow",
+  "config": {
+    "type": "object",
+    "description": "A collage plugin that tells search engines which URLs changed, through the IndexNow protocol: Bing, Yandex, Seznam, Naver and the others that share what one of them is told.",
+    "properties": {
+      "baseURL": {
+        "type": "string",
+        "description": "BaseURL is the site's origin, \"https://example.com\": IndexNow is told absolute URLs, and the application cannot know its own host. Required."
+      },
+      "batchSize": {
+        "type": "integer",
+        "description": "BatchSize caps how many URLs one request carries. Default and at most MaxBatch."
+      },
+      "endpoint": {
+        "type": "string",
+        "description": "Endpoint is where the URLs are posted. Default DefaultEndpoint; a search engine's own, \"https://www.bing.com/indexnow\", works the same."
+      },
+      "exclude": {
+        "type": "array",
+        "description": "Exclude are path prefixes never sent: \"/api/\", \"/search\".",
+        "items": {
+          "type": "string"
+        }
+      },
+      "inDevelopment": {
+        "type": "boolean",
+        "description": "InDevelopment sends from a development server too, which is otherwise silent: what changes on a laptop is not news to a search engine."
+      },
+      "key": {
+        "type": "string",
+        "description": "Key proves the site is yours: 8 to 128 letters, digits and dashes, served at /<key>.txt. Required. Any value works; keep it the same across deployments."
+      },
+      "retries": {
+        "type": "integer",
+        "description": "Retries is how many more times a request is tried when the endpoint answers 429 or 5xx, or cannot be reached. Default 3; negative tries once."
+      },
+      "window": {
+        "type": "string",
+        "description": "WindowString is Window as configuration carries it: \"10s\", \"1m\"."
+      }
+    }
+  }
+}
