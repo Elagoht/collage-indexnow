@@ -32,7 +32,7 @@
       },
       "key": {
         "type": "string",
-        "description": "Key proves the site is yours: 8 to 128 letters, digits and dashes, served at /<key>.txt. Required. Any value works; keep it the same across deployments."
+        "description": "Key proves the site is yours: 8 to 128 letters, digits and dashes, served at /\u003ckey\u003e.txt. Required. Any value works; keep it the same across deployments."
       },
       "retries": {
         "type": "integer",
@@ -42,6 +42,7 @@
         "type": "string",
         "description": "WindowString is Window as configuration carries it: \"10s\", \"1m\"."
       }
-    }
+    },
+    "additionalProperties": false
   }
 }

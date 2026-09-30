@@ -120,7 +120,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.1" }
+func (p *Plugin) Version() string { return "0.1.2" }
 
 // ErrInvalidKey is returned by Init for a missing or malformed key.
 var ErrInvalidKey = errors.New("indexnow: Key must be 8 to 128 letters, digits and dashes")
