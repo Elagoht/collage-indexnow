@@ -56,7 +56,8 @@ type Options struct {
 	// /<key>.txt. Required. Any value works; keep it the same across deployments.
 	Key string `json:"key"`
 	// BaseURL is the site's origin, "https://example.com": IndexNow is told
-	// absolute URLs, and the application cannot know its own host. Required.
+	// absolute URLs, and the application cannot know its own host. Falls back to
+	// the application's Config.BaseURL when empty.
 	BaseURL string `json:"baseURL"`
 	// Endpoint is where the URLs are posted. Default DefaultEndpoint; a search
 	// engine's own, "https://www.bing.com/indexnow", works the same.
@@ -120,7 +121,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.2" }
+func (p *Plugin) Version() string { return "0.1.3" }
 
 // ErrInvalidKey is returned by Init for a missing or malformed key.
 var ErrInvalidKey = errors.New("indexnow: Key must be 8 to 128 letters, digits and dashes")
@@ -136,6 +137,11 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	o := &p.opts
 	if !keyPattern.MatchString(o.Key) {
 		return ErrInvalidKey
+	}
+	// The plugin's own BaseURL wins; otherwise the application's Config.BaseURL,
+	// which collage validated and reports without a trailing slash.
+	if o.BaseURL == "" {
+		o.BaseURL = host.BaseURL()
 	}
 	base, err := url.Parse(o.BaseURL)
 	if o.BaseURL == "" || err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" ||

@@ -304,6 +304,45 @@ func TestDevelopment(t *testing.T) {
 	shutdown(t, app)
 }
 
+// With no BaseURL of its own, the plugin falls back to the application's
+// Config.BaseURL: the host, the key location and the submitted URLs are all on
+// that origin.
+func TestIndexNow_FallsBackToConfigBaseURL(t *testing.T) {
+	e := newEndpoint(t)
+	opts := options(e)
+	opts.BaseURL = "" // fall back to Config.BaseURL
+	app, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BaseURL:  "https://fromconfig.example",
+		Plugins:  []collage.Plugin{indexnow.New(opts)}, // no BaseURL of its own
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
+		WithPath("en", "/a").Static().WithDependency("posts", "tag-a").Build()
+	if err := app.RegisterPage(page); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/a = %d, want 200", rec.Code)
+	}
+	_ = app.InvalidateTags(context.Background(), "tag-a")
+	got := e.wait(t, 1)
+	want := submission{Host: "fromconfig.example", Key: key, KeyLocation: "https://fromconfig.example/" + key + ".txt",
+		URLList: []string{"https://fromconfig.example/a"}}
+	if len(got) != 1 || got[0].Host != want.Host || got[0].KeyLocation != want.KeyLocation ||
+		strings.Join(got[0].URLList, " ") != strings.Join(want.URLList, " ") {
+		t.Errorf("sent %+v, want %+v (on the app's Config.BaseURL)", got, want)
+	}
+	shutdown(t, app)
+}
+
 // A misconfigured plugin does not start.
 func TestRefusals(t *testing.T) {
 	e := newEndpoint(t)
