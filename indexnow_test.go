@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -438,5 +439,90 @@ func TestNoOrigin_StartFails(t *testing.T) {
 	}
 	if err := app.Start(); !errors.Is(err, indexnow.ErrNoBaseURL) {
 		t.Fatalf("Start() = %v, want an error wrapping ErrNoBaseURL", err)
+	}
+}
+
+// countingOrigins resolves every host to https://<host>, counting the calls; for
+// "reenter.test" it invalidates again from inside the resolver, as a resolver
+// that refreshes its own records might.
+type countingOrigins struct {
+	calls  atomic.Int32
+	target collage.CacheInvalidateHook
+}
+
+func (*countingOrigins) Name() string                             { return "test/counting" }
+func (*countingOrigins) Version() string                          { return "0" }
+func (*countingOrigins) Init(context.Context, collage.Host) error { return nil }
+func (*countingOrigins) Shutdown(context.Context) error           { return nil }
+func (o *countingOrigins) Origin(ctx context.Context, host string) (string, bool) {
+	o.calls.Add(1)
+	if host == "reenter.test" {
+		_ = o.target.OnCacheInvalidate(ctx, &collage.CacheInvalidateEvent{
+			Entries: []collage.InvalidatedEntry{{Host: "a.test", Path: "/inner"}}})
+	}
+	return "https://" + host, true
+}
+
+func countingSite(t *testing.T, e *endpoint) (*countingOrigins, *indexnow.Plugin) {
+	t.Helper()
+	o := &countingOrigins{}
+	p := indexnow.New(indexnow.Options{Key: key, Endpoint: e.URL, Window: 50 * time.Millisecond, Backoff: 5 * time.Millisecond})
+	o.target = p
+	app, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins:  []collage.Plugin{o, p},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { shutdown(t, app) })
+	o.calls.Store(0)
+	return o, p
+}
+
+// Each distinct host is resolved once per invalidation, however many of its
+// entries were dropped.
+func TestSubmission_ResolvesEachHostOnce(t *testing.T) {
+	e := newEndpoint(t)
+	o, p := countingSite(t, e)
+	err := p.OnCacheInvalidate(context.Background(), &collage.CacheInvalidateEvent{Entries: []collage.InvalidatedEntry{
+		{Host: "a.test", Path: "/1"}, {Host: "a.test", Path: "/2"}, {Host: "a.test", Path: "/3"}, {Host: "b.test", Path: "/1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := o.calls.Load(); n != 2 {
+		t.Errorf("resolver called %d times, want 2 (once per host)", n)
+	}
+	e.wait(t, 2)
+}
+
+// The resolver runs outside the plugin's lock: one that invalidates again from
+// inside does not deadlock.
+func TestSubmission_ResolverRunsOutsideTheLock(t *testing.T) {
+	e := newEndpoint(t)
+	_, p := countingSite(t, e)
+	done := make(chan error, 1)
+	go func() {
+		done <- p.OnCacheInvalidate(context.Background(), &collage.CacheInvalidateEvent{
+			Entries: []collage.InvalidatedEntry{{Host: "reenter.test", Path: "/outer"}}})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnCacheInvalidate deadlocked: the resolver ran under the plugin's lock")
+	}
+	got := e.wait(t, 2)
+	sort.Slice(got, func(i, j int) bool { return got[i].Host < got[j].Host })
+	if len(got) != 2 || fmt.Sprint(got[0].URLList) != "[https://a.test/inner]" || fmt.Sprint(got[1].URLList) != "[https://reenter.test/outer]" {
+		t.Errorf("sent %+v", got)
 	}
 }

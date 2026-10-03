@@ -224,33 +224,41 @@ func (p *Plugin) OnCacheInvalidate(ctx context.Context, ev *collage.CacheInvalid
 	if !p.enabled || len(ev.Entries) == 0 {
 		return nil
 	}
-	added := false
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil
-	}
+	// Origins are named before the lock, once per host: OriginFor may be a
+	// resolver's I/O, which must hold up neither a flush nor another
+	// invalidation, and a resolver that invalidates in turn would deadlock.
+	urls := make([]string, 0, len(ev.Entries))
+	byHost := make(map[string]string)
 	for _, entry := range ev.Entries {
 		if p.excluded(entry.Path) {
 			continue
 		}
 		origin := p.base
 		if origin == "" && p.origins != nil {
-			origin = p.origins.OriginFor(ctx, entry.Host)
+			var named bool
+			if origin, named = byHost[entry.Host]; !named {
+				origin = p.origins.OriginFor(ctx, entry.Host)
+				byHost[entry.Host] = origin
+			}
 		}
 		if origin == "" {
 			continue
 		}
-		p.pending[origin+entry.Path] = struct{}{}
-		added = true
+		urls = append(urls, origin+entry.Path)
 	}
-	if added {
-		p.start.Do(p.run)
-	}
-	p.mu.Unlock()
-	if !added {
+	if len(urls) == 0 {
 		return nil
 	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	for _, u := range urls {
+		p.pending[u] = struct{}{}
+	}
+	p.start.Do(p.run)
+	p.mu.Unlock()
 	select {
 	case p.wake <- struct{}{}:
 	default: // already woken; the batch it opened will carry these too
