@@ -3,6 +3,8 @@ package indexnow_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -364,5 +366,77 @@ func TestRefusals(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s: %d, want 503", name, rec.Code)
 		}
+	}
+}
+
+// origins resolves two hosts, as elagoht/tenant would.
+type origins struct{}
+
+func (origins) Name() string                             { return "test/origins" }
+func (origins) Version() string                          { return "0" }
+func (origins) Init(context.Context, collage.Host) error { return nil }
+func (origins) Shutdown(context.Context) error           { return nil }
+func (origins) Origin(_ context.Context, host string) (string, bool) {
+	switch host {
+	case "a.test":
+		return "https://a.example", true
+	case "b.test":
+		return "https://b.example", true
+	}
+	return "", false
+}
+
+// Without a BaseURL, each dropped entry is absolute against its own host's origin,
+// one submission per origin, and a path two hosts of one origin share is sent once.
+func TestSubmission_PerOrigin(t *testing.T) {
+	e := newEndpoint(t)
+	app, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins: []collage.Plugin{origins{}, indexnow.New(indexnow.Options{
+			Key: key, Endpoint: e.URL, Window: 50 * time.Millisecond, Backoff: 5 * time.Millisecond,
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
+		WithPath("en", "/a").Static().WithDependency("posts").Build()
+	if err := app.RegisterPage(page); err != nil {
+		t.Fatal(err)
+	}
+	for _, url := range []string{"http://a.test/a", "http://b.test/a", "http://A.test:80/a"} {
+		app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, url, nil))
+	}
+	_ = app.InvalidateTags(context.Background(), "posts")
+	got := e.wait(t, 2)
+	e.none(t, 150*time.Millisecond)
+	sort.Slice(got, func(i, j int) bool { return got[i].Host < got[j].Host })
+	want := []submission{
+		{Host: "a.example", Key: key, KeyLocation: "https://a.example/" + key + ".txt", URLList: []string{"https://a.example/a"}},
+		{Host: "b.example", Key: key, KeyLocation: "https://b.example/" + key + ".txt", URLList: []string{"https://b.example/a"}},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("sent %+v, want %+v", got, want)
+	}
+	shutdown(t, app)
+}
+
+// With no BaseURL of its own, none in Config and no resolver, the application
+// does not start: there is no origin to tell IndexNow.
+func TestNoOrigin_StartFails(t *testing.T) {
+	app, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins:  []collage.Plugin{indexnow.New(indexnow.Options{Key: key})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); !errors.Is(err, indexnow.ErrNoBaseURL) {
+		t.Fatalf("Start() = %v, want an error wrapping ErrNoBaseURL", err)
 	}
 }

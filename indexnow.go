@@ -28,9 +28,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,8 +58,10 @@ type Options struct {
 	// /<key>.txt. Required. Any value works; keep it the same across deployments.
 	Key string `json:"key"`
 	// BaseURL is the site's origin, "https://example.com": IndexNow is told
-	// absolute URLs, and the application cannot know its own host. Falls back to
-	// the application's Config.BaseURL when empty.
+	// absolute URLs, and the application cannot know its own host. When set it is
+	// used for every URL. When empty, each URL takes the origin of the host it was
+	// cached under: a plugin implementing collage.OriginResolver (elagoht/tenant)
+	// names it, else the application's Config.BaseURL.
 	BaseURL string `json:"baseURL"`
 	// Endpoint is where the URLs are posted. Default DefaultEndpoint; a search
 	// engine's own, "https://www.bing.com/indexnow", works the same.
@@ -92,8 +96,8 @@ type Plugin struct {
 	opts    Options
 	log     *slog.Logger
 	enabled bool
-	host    string // the site's host, as IndexNow is told it
-	base    string // BaseURL without its trailing slash
+	base    string // the plugin's own BaseURL without its trailing slash; empty when origins decide
+	origins collage.Origins
 	keyPath string
 
 	mu      sync.Mutex
@@ -121,7 +125,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.3" }
+func (p *Plugin) Version() string { return "0.2.0" }
 
 // ErrInvalidKey is returned by Init for a missing or malformed key.
 var ErrInvalidKey = errors.New("indexnow: Key must be 8 to 128 letters, digits and dashes")
@@ -138,14 +142,24 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if !keyPattern.MatchString(o.Key) {
 		return ErrInvalidKey
 	}
-	// The plugin's own BaseURL wins; otherwise the application's Config.BaseURL,
-	// which collage validated and reports without a trailing slash.
-	if o.BaseURL == "" {
-		o.BaseURL = host.BaseURL()
-	}
-	base, err := url.Parse(o.BaseURL)
-	if o.BaseURL == "" || err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" ||
-		(base.Path != "" && base.Path != "/") || base.RawQuery != "" {
+	// The plugin's own BaseURL wins, for every entry. Without one, each entry is
+	// absolute against the origin collage names for its host: a resolver plugin's,
+	// else Config.BaseURL.
+	switch {
+	case o.BaseURL != "":
+		base, err := url.Parse(o.BaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" ||
+			(base.Path != "" && base.Path != "/") || base.RawQuery != "" {
+			return fmt.Errorf("%w, an origin such as https://example.com; got %q", ErrNoBaseURL, o.BaseURL)
+		}
+		p.base = strings.TrimSuffix(o.BaseURL, "/")
+	case canResolve(host):
+		p.origins, _ = host.(collage.Origins)
+		if p.origins == nil {
+			// A host that cannot resolve per host still knows Config.BaseURL.
+			p.base = host.BaseURL()
+		}
+	default:
 		return fmt.Errorf("%w, an origin such as https://example.com; got %q", ErrNoBaseURL, o.BaseURL)
 	}
 	if o.Endpoint == "" {
@@ -178,8 +192,6 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 
 	p.log = host.Logger()
-	p.host = base.Hostname()
-	p.base = strings.TrimSuffix(o.BaseURL, "/")
 	p.keyPath = "/" + o.Key + ".txt"
 	p.enabled = !host.DevMode() || o.InDevelopment
 	p.pending = make(map[string]struct{})
@@ -194,11 +206,22 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	return nil
 }
 
+// canResolve reports whether collage can name an origin without the plugin's
+// own BaseURL: from Config.BaseURL, or per host from a plugin implementing
+// collage.OriginResolver.
+func canResolve(host collage.Host) bool {
+	if host.BaseURL() != "" {
+		return true
+	}
+	origins, ok := host.(collage.Origins)
+	return ok && origins.Dynamic()
+}
+
 // OnCacheInvalidate queues the URLs the invalidation dropped, and returns: the
 // sending happens elsewhere, so an invalidation from a request, a webhook or a
 // command is never held up by a search engine.
-func (p *Plugin) OnCacheInvalidate(_ context.Context, ev *collage.CacheInvalidateEvent) error {
-	if !p.enabled || len(ev.Paths) == 0 {
+func (p *Plugin) OnCacheInvalidate(ctx context.Context, ev *collage.CacheInvalidateEvent) error {
+	if !p.enabled || len(ev.Entries) == 0 {
 		return nil
 	}
 	added := false
@@ -207,11 +230,18 @@ func (p *Plugin) OnCacheInvalidate(_ context.Context, ev *collage.CacheInvalidat
 		p.mu.Unlock()
 		return nil
 	}
-	for _, path := range ev.Paths {
-		if p.excluded(path) {
+	for _, entry := range ev.Entries {
+		if p.excluded(entry.Path) {
 			continue
 		}
-		p.pending[p.base+path] = struct{}{}
+		origin := p.base
+		if origin == "" && p.origins != nil {
+			origin = p.origins.OriginFor(ctx, entry.Host)
+		}
+		if origin == "" {
+			continue
+		}
+		p.pending[origin+entry.Path] = struct{}{}
 		added = true
 	}
 	if added {
@@ -307,20 +337,51 @@ func (p *Plugin) flush(ctx context.Context, interrupt <-chan struct{}) error {
 	p.mu.Unlock()
 	sort.Strings(urls)
 
+	// IndexNow takes one host per submission: group by origin, in a stable order.
+	byOrigin := make(map[string][]string)
+	for _, u := range urls {
+		byOrigin[originOf(u)] = append(byOrigin[originOf(u)], u)
+	}
+	origins := slices.Sorted(maps.Keys(byOrigin))
+
 	var errs []error
-	for start := 0; start < len(urls); start += p.opts.BatchSize {
-		batch := urls[start:min(start+p.opts.BatchSize, len(urls))]
-		err := p.send(ctx, interrupt, batch)
-		if errors.Is(err, errInterrupted) {
-			p.requeue(urls[start:])
-			return err
-		}
-		if err != nil {
-			p.log.Error("indexnow: URLs not submitted", "count", len(batch), "error", err)
-			errs = append(errs, err)
+	for i, origin := range origins {
+		list := byOrigin[origin]
+		for start := 0; start < len(list); start += p.opts.BatchSize {
+			batch := list[start:min(start+p.opts.BatchSize, len(list))]
+			err := p.send(ctx, interrupt, origin, batch)
+			if errors.Is(err, errInterrupted) {
+				p.requeue(list[start:])
+				for _, rest := range origins[i+1:] {
+					p.requeue(byOrigin[rest])
+				}
+				return err
+			}
+			if err != nil {
+				p.log.Error("indexnow: URLs not submitted", "origin", origin, "count", len(batch), "error", err)
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// originOf is u's scheme and host: the origin it was queued under.
+func originOf(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// hostname is origin's host, as IndexNow is told it.
+func hostname(origin string) string {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func (p *Plugin) requeue(urls []string) {
@@ -340,12 +401,12 @@ type submission struct {
 	URLList     []string `json:"urlList"`
 }
 
-// send posts one batch, trying again when the endpoint is busy or unreachable.
-func (p *Plugin) send(ctx context.Context, interrupt <-chan struct{}, batch []string) error {
+// send posts one batch, all of one origin, trying again when the endpoint is busy or unreachable.
+func (p *Plugin) send(ctx context.Context, interrupt <-chan struct{}, origin string, batch []string) error {
 	body, err := json.Marshal(submission{
-		Host:        p.host,
+		Host:        hostname(origin),
 		Key:         p.opts.Key,
-		KeyLocation: p.base + p.keyPath,
+		KeyLocation: origin + p.keyPath,
 		URLList:     batch,
 	})
 	if err != nil {

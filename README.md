@@ -82,8 +82,13 @@ endpoint.
 ```
 
 `key` is required; `baseURL` is an origin with no path, and may be left empty to take
-the application's `Config.BaseURL` (collage v0.39.0). The application does not start
-when a required value is missing. `endpoint` may be a search engine's own —
+the application's `Config.BaseURL` (collage v0.39.0). A site served on several hosts
+leaves it empty: each dropped entry is then submitted under the origin collage names
+for the host it was cached under (collage v0.42.0, resolved by a plugin such as
+`elagoht/tenant`), one IndexNow submission per origin, and a path two hosts of one
+origin share is sent once. With `baseURL` set, it is used for every entry. The
+application does not start when a required value is missing, or when there is no
+`baseURL`, no `Config.BaseURL` and no origin resolver. `endpoint` may be a search engine's own —
 `https://www.bing.com/indexnow` — which shares with the rest the same way.
 `exclude` lists path prefixes never sent. A negative `retries` tries once. In Go,
 `Window` and `Backoff` are `time.Duration`s and `Client` the `*http.Client` that

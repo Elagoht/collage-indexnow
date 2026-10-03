@@ -9,7 +9,7 @@
     "properties": {
       "baseURL": {
         "type": "string",
-        "description": "BaseURL is the site's origin, \"https://example.com\": IndexNow is told absolute URLs, and the application cannot know its own host. Required."
+        "description": "BaseURL is the site's origin, \"https://example.com\": IndexNow is told absolute URLs, and the application cannot know its own host. When set it is used for every URL. When empty, each URL takes the origin of the host it was cached under: a plugin implementing collage.OriginResolver (elagoht/tenant) names it, else the application's Config.BaseURL."
       },
       "batchSize": {
         "type": "integer",
