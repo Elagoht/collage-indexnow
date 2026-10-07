@@ -125,7 +125,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.0" }
+func (p *Plugin) Version() string { return "0.2.1" }
 
 // ErrInvalidKey is returned by Init for a missing or malformed key.
 var ErrInvalidKey = errors.New("indexnow: Key must be 8 to 128 letters, digits and dashes")
@@ -135,9 +135,11 @@ var ErrNoBaseURL = errors.New("indexnow: BaseURL is required: IndexNow is told a
 
 // Init reads the configuration, refuses what is wrong with it, and serves the key.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
-	if err := host.Config(&p.opts); err != nil {
+	opts, err := collage.PluginConfig(host, p.opts)
+	if err != nil {
 		return err
 	}
+	p.opts = opts
 	o := &p.opts
 	if !keyPattern.MatchString(o.Key) {
 		return ErrInvalidKey
