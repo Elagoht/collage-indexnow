@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,11 +14,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	indexnow "github.com/Elagoht/collage-indexnow"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 const key = "4f1c2e9a-7b3d4c8e"
@@ -97,33 +95,36 @@ func (e *endpoint) none(t *testing.T, within time.Duration) {
 	}
 }
 
-func site(t *testing.T, dev bool, opts indexnow.Options, config map[string]json.RawMessage) *collage.App {
-	t.Helper()
-	app, err := collage.New(&collage.Config{
-		DevMode:      dev,
-		Server:       collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template:     collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Cache:        collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:      []collage.Plugin{indexnow.New(opts)},
-		PluginConfig: config,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// siteOptions builds the test site: five pages and an /api/x page, all cached
+// and tagged, on https://example.com, with config as the plugin's section.
+func siteOptions(dev bool, opts indexnow.Options, config string) []collagetest.SiteOption {
+	var pages []collage.Registrable
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
-		page := collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).
-			WithPath("en", "/"+name).Static().WithDependencyTags("posts", "tag-"+name).Build()
-		if err := app.RegisterPage(page); err != nil {
-			t.Fatal(err)
-		}
+		pages = append(pages, collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).
+			WithPath("en", "/"+name).Static().WithDependencyTags("posts", "tag-"+name).Build())
 	}
-	api := collage.NewPage("api").WithContent(collage.NewFragment("api", "p.html").Build()).
-		WithPath("en", "/api/x").Static().WithDependencyTags("posts").Build()
-	if err := app.RegisterPage(api); err != nil {
-		t.Fatal(err)
+	pages = append(pages, collage.NewPage("api").WithContent(collage.NewFragment("api", "p.html").Build()).
+		WithPath("en", "/api/x").Static().WithDependencyTags("posts").Build())
+	options := []collagetest.SiteOption{
+		collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>page</p>`}),
+		collagetest.WithRegister(pages...),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.DevMode = dev
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+			c.BaseURL = "https://example.com"
+		}),
+		collagetest.WithPlugins(indexnow.New(opts)),
 	}
-	return app
+	if config != "" {
+		options = append(options, collagetest.WithPluginConfig(indexnow.Name, config))
+	}
+	return options
+}
+
+func site(t *testing.T, dev bool, opts indexnow.Options, config string) *collage.App {
+	t.Helper()
+	return collagetest.NewSite(t, siteOptions(dev, opts, config)...).App
 }
 
 // warm caches every page, so an invalidation has something to drop.
@@ -139,7 +140,7 @@ func warm(t *testing.T, app *collage.App) {
 }
 
 func options(e *endpoint) indexnow.Options {
-	return indexnow.Options{Key: key, BaseURL: "https://example.com/", Endpoint: e.URL, Window: 50 * time.Millisecond, Backoff: 5 * time.Millisecond, Exclude: []string{"/api/"}}
+	return indexnow.Options{Key: key, Endpoint: e.URL, Window: collage.Duration(50 * time.Millisecond), Backoff: collage.Duration(5 * time.Millisecond), Skip: []string{"/api"}}
 }
 
 func shutdown(t *testing.T, app *collage.App) {
@@ -155,7 +156,7 @@ func shutdown(t *testing.T, app *collage.App) {
 // and where the key is.
 func TestBatchedSubmission(t *testing.T) {
 	e := newEndpoint(t)
-	app := site(t, false, options(e), nil)
+	app := site(t, false, options(e), "")
 	warm(t, app)
 	ctx := context.Background()
 	_ = app.InvalidateTags(ctx, "tag-a")
@@ -173,7 +174,7 @@ func TestBatchedSubmission(t *testing.T) {
 
 // The key is served where keyLocation says.
 func TestKeyFile(t *testing.T) {
-	app := site(t, false, options(newEndpoint(t)), nil)
+	app := site(t, false, options(newEndpoint(t)), "")
 	rec := httptest.NewRecorder()
 	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+key+".txt", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != key || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
@@ -182,7 +183,7 @@ func TestKeyFile(t *testing.T) {
 
 	// A static build writes it too.
 	out := t.TempDir()
-	if _, err := collage.Build(context.Background(), site(t, false, options(newEndpoint(t)), nil), collage.BuildOptions{OutDir: out}); err != nil {
+	if _, err := collage.Build(context.Background(), site(t, false, options(newEndpoint(t)), ""), collage.BuildOptions{OutDir: out}); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(filepath.Join(out, key+".txt")); err != nil || string(body) != key {
@@ -193,7 +194,7 @@ func TestKeyFile(t *testing.T) {
 // A busy endpoint is tried again; a refusal is not.
 func TestRetries(t *testing.T) {
 	e := newEndpoint(t, http.StatusServiceUnavailable, http.StatusTooManyRequests, http.StatusAccepted)
-	app := site(t, false, options(e), nil)
+	app := site(t, false, options(e), "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-c")
 	got := e.wait(t, 3)
@@ -206,7 +207,7 @@ func TestRetries(t *testing.T) {
 	shutdown(t, app)
 
 	refused := newEndpoint(t, http.StatusForbidden)
-	app = site(t, false, options(refused), nil)
+	app = site(t, false, options(refused), "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-c")
 	refused.wait(t, 1)
@@ -217,7 +218,7 @@ func TestRetries(t *testing.T) {
 	down := newEndpoint(t, http.StatusBadGateway)
 	opts := options(down)
 	opts.Retries = 2
-	app = site(t, false, opts, nil)
+	app = site(t, false, opts, "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-c")
 	down.wait(t, 3)
@@ -229,7 +230,7 @@ func TestBatchSize(t *testing.T) {
 	e := newEndpoint(t)
 	opts := options(e)
 	opts.BatchSize = 2
-	app := site(t, false, opts, nil)
+	app := site(t, false, opts, "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "posts")
 	got := e.wait(t, 3)
@@ -252,8 +253,8 @@ func TestNeverBlocks(t *testing.T) {
 	e := newEndpoint(t)
 	e.hold = make(chan struct{})
 	opts := options(e)
-	opts.Window = time.Millisecond
-	app := site(t, false, opts, nil)
+	opts.Window = collage.Duration(time.Millisecond)
+	app := site(t, false, opts, "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-a")
 	time.Sleep(50 * time.Millisecond) // the first request is now held by the endpoint
@@ -273,8 +274,8 @@ func TestNeverBlocks(t *testing.T) {
 func TestShutdownFlushes(t *testing.T) {
 	e := newEndpoint(t)
 	opts := options(e)
-	opts.Window = time.Hour
-	app := site(t, false, opts, nil)
+	opts.Window = collage.Duration(time.Hour)
+	app := site(t, false, opts, "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-d")
 	e.none(t, 50*time.Millisecond)
@@ -287,81 +288,89 @@ func TestShutdownFlushes(t *testing.T) {
 // A development server tells nobody, unless asked to.
 func TestDevelopment(t *testing.T) {
 	e := newEndpoint(t)
-	app := site(t, true, options(e), nil)
+	app := site(t, true, options(e), "")
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-a")
 	e.none(t, 200*time.Millisecond)
 	shutdown(t, app)
 
-	config := map[string]json.RawMessage{indexnow.Name: json.RawMessage(`{"inDevelopment":true,"window":"20ms"}`)}
 	opts := options(e)
-	opts.Window = time.Hour
-	app = site(t, true, opts, config)
+	opts.Window = collage.Duration(time.Hour)
+	app = site(t, true, opts, `{"inDevelopment":true,"window":"20ms"}`)
 	warm(t, app)
 	_ = app.InvalidateTags(context.Background(), "tag-a")
 	e.wait(t, 1)
 	shutdown(t, app)
 }
 
-// With no BaseURL of its own, the plugin falls back to the application's
-// Config.BaseURL: the host, the key location and the submitted URLs are all on
-// that origin.
-func TestIndexNow_FallsBackToConfigBaseURL(t *testing.T) {
-	e := newEndpoint(t)
-	opts := options(e)
-	opts.BaseURL = "" // fall back to Config.BaseURL
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BaseURL:  "https://fromconfig.example",
-		Plugins:  []collage.Plugin{indexnow.New(opts)}, // no BaseURL of its own
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
-		WithPath("en", "/a").Static().WithDependencyTags("posts", "tag-a").Build()
-	if err := app.RegisterPage(page); err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/a = %d, want 200", rec.Code)
-	}
-	_ = app.InvalidateTags(context.Background(), "tag-a")
-	got := e.wait(t, 1)
-	want := submission{Host: "fromconfig.example", Key: key, KeyLocation: "https://fromconfig.example/" + key + ".txt",
-		URLList: []string{"https://fromconfig.example/a"}}
-	if len(got) != 1 || got[0].Host != want.Host || got[0].KeyLocation != want.KeyLocation ||
-		strings.Join(got[0].URLList, " ") != strings.Join(want.URLList, " ") {
-		t.Errorf("sent %+v, want %+v (on the app's Config.BaseURL)", got, want)
-	}
-	shutdown(t, app)
-}
-
 // A misconfigured plugin does not start.
 func TestRefusals(t *testing.T) {
 	e := newEndpoint(t)
-	for name, mutate := range map[string]func(*indexnow.Options){
-		"no key":        func(o *indexnow.Options) { o.Key = "" },
-		"short key":     func(o *indexnow.Options) { o.Key = "abc1234" },
-		"long key":      func(o *indexnow.Options) { o.Key = strings.Repeat("a", 129) },
-		"key character": func(o *indexnow.Options) { o.Key = "abcd_1234" },
-		"no base":       func(o *indexnow.Options) { o.BaseURL = "" },
-		"base path":     func(o *indexnow.Options) { o.BaseURL = "https://example.com/blog" },
-		"base scheme":   func(o *indexnow.Options) { o.BaseURL = "example.com" },
-		"endpoint":      func(o *indexnow.Options) { o.Endpoint = "ftp://x" },
-		"window":        func(o *indexnow.Options) { o.WindowString = "soon" },
+	for name, c := range map[string]struct {
+		mutate func(*indexnow.Options)
+		config string
+	}{
+		"no key":          {mutate: func(o *indexnow.Options) { o.Key = "" }},
+		"short key":       {mutate: func(o *indexnow.Options) { o.Key = "abc1234" }},
+		"long key":        {mutate: func(o *indexnow.Options) { o.Key = strings.Repeat("a", 129) }},
+		"key character":   {mutate: func(o *indexnow.Options) { o.Key = "abcd_1234" }},
+		"endpoint":        {mutate: func(o *indexnow.Options) { o.Endpoint = "ftp://x" }},
+		"window":          {config: `{"window":"soon"}`},
+		"window number":   {config: `{"window":10}`},
+		"negative window": {config: `{"window":"-1s"}`},
+		"backoff number":  {config: `{"backoff":2}`},
+		"batchSize":       {config: `{"batchSize":-1}`},
+		"retries":         {config: `{"retries":-1}`},
 	} {
 		opts := options(e)
-		mutate(&opts)
-		rec := httptest.NewRecorder()
-		site(t, false, opts, nil).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a", nil))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("%s: %d, want 503", name, rec.Code)
+		if c.mutate != nil {
+			c.mutate(&opts)
+		}
+		if _, err := collagetest.TrySite(t, siteOptions(false, opts, c.config)...); err == nil {
+			t.Errorf("%s: the application started", name)
+		}
+	}
+}
+
+// Keys removed or renamed in v0.3.0 stop the application: baseURL (core's origin
+// replaces it) and exclude (now skip).
+func TestRemovedKeys(t *testing.T) {
+	e := newEndpoint(t)
+	for _, k := range []string{"baseURL", "exclude"} {
+		_, err := collagetest.TrySite(t, siteOptions(false, options(e), `{"`+k+`":"x"}`)...)
+		if err == nil || !strings.Contains(err.Error(), `unknown key "`+k+`"`) {
+			t.Errorf("%s: start = %v, want an unknown key error", k, err)
+		}
+	}
+}
+
+// Backoff can come from configuration, as a duration string.
+func TestBackoffFromConfig(t *testing.T) {
+	e := newEndpoint(t, http.StatusServiceUnavailable, http.StatusOK)
+	opts := options(e)
+	opts.Backoff = collage.Duration(time.Hour)
+	app := site(t, false, opts, `{"backoff":"10ms"}`)
+	warm(t, app)
+	_ = app.InvalidateTags(context.Background(), "tag-a")
+	e.wait(t, 2) // the retry comes after 10ms, not an hour
+	shutdown(t, app)
+}
+
+// A skip prefix covers the path and what is under it, with or without a trailing
+// slash, and nothing that merely starts with the same letters.
+func TestSkipPrefix(t *testing.T) {
+	for _, prefix := range []string{"/api", "/api/"} {
+		e := newEndpoint(t)
+		opts := indexnow.Options{Key: key, Endpoint: e.URL, Window: collage.Duration(20 * time.Millisecond), Skip: []string{prefix}}
+		plugin := indexnow.New(opts)
+		collagetest.NewSite(t, collagetest.WithConfig(func(c *collage.Config) { c.BaseURL = "https://example.com" }),
+			collagetest.WithPlugins(plugin))
+		_ = plugin.OnCacheInvalidate(context.Background(), &collage.CacheInvalidateEvent{Entries: []collage.InvalidatedEntry{
+			{Path: "/api"}, {Path: "/api/x"}, {Path: "/apix"}, {Path: "/b"},
+		}})
+		got := e.wait(t, 1)
+		if fmt.Sprint(got[0].URLList) != "[https://example.com/apix https://example.com/b]" {
+			t.Errorf("skip %q: sent %v", prefix, got[0].URLList)
 		}
 	}
 }
@@ -383,27 +392,21 @@ func (origins) Origin(_ context.Context, host string) (string, bool) {
 	return "", false
 }
 
-// Without a BaseURL, each dropped entry is absolute against its own host's origin,
+// With a resolver, each dropped entry is absolute against its own host's origin,
 // one submission per origin, and a path two hosts of one origin share is sent once.
 func TestSubmission_PerOrigin(t *testing.T) {
 	e := newEndpoint(t)
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins: []collage.Plugin{origins{}, indexnow.New(indexnow.Options{
-			Key: key, Endpoint: e.URL, Window: 50 * time.Millisecond, Backoff: 5 * time.Millisecond,
-		})},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
-		WithPath("en", "/a").Static().WithDependencyTags("posts").Build()
-	if err := app.RegisterPage(page); err != nil {
-		t.Fatal(err)
-	}
+	app := collagetest.NewSite(t, collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>page</p>`}),
+		collagetest.WithRegister(collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
+			WithPath("en", "/a").Static().WithDependencyTags("posts").Build()),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+		}),
+		collagetest.WithPlugins(origins{}, indexnow.New(indexnow.Options{
+			Key: key, Endpoint: e.URL, Window: collage.Duration(50 * time.Millisecond), Backoff: collage.Duration(5 * time.Millisecond),
+		})),
+	).App
 	for _, url := range []string{"http://a.test/a", "http://b.test/a", "http://A.test:80/a"} {
 		app.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, url, nil))
 	}
@@ -421,20 +424,12 @@ func TestSubmission_PerOrigin(t *testing.T) {
 	shutdown(t, app)
 }
 
-// With no BaseURL of its own, none in Config and no resolver, the application
-// does not start: there is no origin to tell IndexNow.
+// With no Config.BaseURL and no resolver, the application does not start: there
+// is no origin to tell IndexNow.
 func TestNoOrigin_StartFails(t *testing.T) {
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:  []collage.Plugin{indexnow.New(indexnow.Options{Key: key})},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Start(); !errors.Is(err, indexnow.ErrNoBaseURL) {
-		t.Fatalf("Start() = %v, want an error wrapping ErrNoBaseURL", err)
+	_, err := collagetest.TrySite(t, collagetest.WithPlugins(indexnow.New(indexnow.Options{Key: key})))
+	if !errors.Is(err, indexnow.ErrNoBaseURL) {
+		t.Fatalf("start = %v, want an error wrapping ErrNoBaseURL", err)
 	}
 }
 
@@ -462,21 +457,9 @@ func (o *countingOrigins) Origin(ctx context.Context, host string) (string, bool
 func countingSite(t *testing.T, e *endpoint) (*countingOrigins, *indexnow.Plugin) {
 	t.Helper()
 	o := &countingOrigins{}
-	p := indexnow.New(indexnow.Options{Key: key, Endpoint: e.URL, Window: 50 * time.Millisecond, Backoff: 5 * time.Millisecond})
+	p := indexnow.New(indexnow.Options{Key: key, Endpoint: e.URL, Window: collage.Duration(50 * time.Millisecond), Backoff: collage.Duration(5 * time.Millisecond)})
 	o.target = p
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>page</p>`)}}, Root: "t"},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:  []collage.Plugin{o, p},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { shutdown(t, app) })
+	collagetest.NewSite(t, collagetest.WithPlugins(o, p))
 	o.calls.Store(0)
 	return o, p
 }

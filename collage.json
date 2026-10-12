@@ -3,28 +3,27 @@
   "name": "elagoht/indexnow",
   "description": "A collage plugin that tells search engines which URLs changed, through the IndexNow protocol: Bing, Yandex, Seznam, Naver and the others that share what one of them is told.",
   "repository": "https://github.com/Elagoht/collage-indexnow",
+  "setup": "Set `\"key\"` (8 to 128 letters, digits and dashes, such as `openssl rand -hex 16` makes) in this plugin's section of `plugins-config.json`, and the site's origin: `BASE_URL` in a project `collage new` made (it becomes `Config.BaseURL`), or an origin resolver such as `elagoht/tenant`. Without either the application does not start.",
   "config": {
     "type": "object",
     "description": "A collage plugin that tells search engines which URLs changed, through the IndexNow protocol: Bing, Yandex, Seznam, Naver and the others that share what one of them is told.",
     "properties": {
-      "baseURL": {
+      "backoff": {
         "type": "string",
-        "description": "BaseURL is the site's origin, \"https://example.com\": IndexNow is told absolute URLs, and the application cannot know its own host. When set it is used for every URL. When empty, each URL takes the origin of the host it was cached under: a plugin implementing collage.OriginResolver (elagoht/tenant) names it, else the application's Config.BaseURL."
+        "description": "Backoff is how long the first retry waits, doubled for each one after it, unless the endpoint says otherwise with Retry-After: \"2s\". Default two seconds.",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
       },
       "batchSize": {
         "type": "integer",
-        "description": "BatchSize caps how many URLs one request carries. Default and at most MaxBatch."
+        "description": "BatchSize caps how many URLs one request carries. Default and at most MaxBatch; negative is an error."
       },
       "endpoint": {
         "type": "string",
-        "description": "Endpoint is where the URLs are posted. Default DefaultEndpoint; a search engine's own, \"https://www.bing.com/indexnow\", works the same."
-      },
-      "exclude": {
-        "type": "array",
-        "description": "Exclude are path prefixes never sent: \"/api/\", \"/search\".",
-        "items": {
-          "type": "string"
-        }
+        "description": "Endpoint is where the URLs are posted. Default IndexNow's shared endpoint, \"https://api.indexnow.org/indexnow\", which passes what it is told on to every participating search engine; a search engine's own, \"https://www.bing.com/indexnow\", works the same."
       },
       "inDevelopment": {
         "type": "boolean",
@@ -36,11 +35,23 @@
       },
       "retries": {
         "type": "integer",
-        "description": "Retries is how many more times a request is tried when the endpoint answers 429 or 5xx, or cannot be reached. Default 3; negative tries once."
+        "description": "Retries is how many more times a request is tried when the endpoint answers 429 or 5xx, or cannot be reached. Default 3; negative is an error."
+      },
+      "skip": {
+        "type": "array",
+        "description": "Skip are request path prefixes never sent: \"/api\", \"/search\". A prefix covers the path itself and everything under it, with or without a trailing \"/\".",
+        "items": {
+          "type": "string"
+        }
       },
       "window": {
         "type": "string",
-        "description": "WindowString is Window as configuration carries it: \"10s\", \"1m\"."
+        "description": "Window is how long URLs are collected after the first one before they are sent together: \"10s\", \"1m\". Default ten seconds.",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
       }
     },
     "additionalProperties": false

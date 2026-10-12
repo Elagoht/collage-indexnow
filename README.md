@@ -6,14 +6,14 @@ others that share what one of them is told.
 
 ```go
 app, err := collage.New(&collage.Config{
+	BaseURL: "https://example.com",
 	Plugins: []collage.Plugin{indexnow.New(indexnow.Options{
-		Key:     "4f1c2e9a7b3d4c8e",
-		BaseURL: "https://example.com",
+		Key: "4f1c2e9a7b3d4c8e",
 	})},
 })
 ```
 
-Requires collage v0.60.0 or later.
+Requires collage v0.61.0 or later.
 
 ## What is sent, and when
 
@@ -70,29 +70,45 @@ endpoint.
 {
   "elagoht/indexnow": {
     "key": "4f1c2e9a7b3d4c8e",
-    "baseURL": "https://example.com",
     "endpoint": "https://api.indexnow.org/indexnow",
     "window": "10s",
+    "backoff": "2s",
     "batchSize": 10000,
     "retries": 3,
-    "exclude": ["/api/", "/search"],
+    "skip": ["/api", "/search"],
     "inDevelopment": false
   }
 }
 ```
 
-`key` is required; `baseURL` is an origin with no path, and may be left empty to take
-the application's `Config.BaseURL` (collage v0.39.0). A site served on several hosts
-leaves it empty: each dropped entry is then submitted under the origin collage names
-for the host it was cached under (collage v0.42.0, resolved by a plugin such as
-`elagoht/tenant`), one IndexNow submission per origin, and a path two hosts of one
-origin share is sent once. With `baseURL` set, it is used for every entry. The
-application does not start when a required value is missing, or when there is no
-`baseURL`, no `Config.BaseURL` and no origin resolver. `endpoint` may be a search engine's own —
-`https://www.bing.com/indexnow` — which shares with the rest the same way.
-`exclude` lists path prefixes never sent. A negative `retries` tries once. In Go,
-`Window` and `Backoff` are `time.Duration`s and `Client` the `*http.Client` that
-sends.
+`key` is required. URLs are absolute against the site's origin: the application's
+`Config.BaseURL` (`BASE_URL`), or, on a site served on several hosts, the origin
+collage names for the host each entry was cached under (resolved by a plugin such
+as `elagoht/tenant`), one IndexNow submission per origin, and a path two hosts of
+one origin share is sent once. The application does not start when the key is
+missing or malformed, or when there is no `Config.BaseURL` and no origin resolver.
+`endpoint` may be a search engine's own — `https://www.bing.com/indexnow` — which
+shares with the rest the same way. `window` and `backoff` are duration strings
+(`"10s"`); a bare number, or a negative one, stops the application. `skip` lists
+request path prefixes never sent; a prefix covers the path and everything under it,
+with or without a trailing `/`. `batchSize` and `retries` take 0 for their default,
+and a negative value stops the application. In Go, `HTTPClient` is the
+`*http.Client` that sends.
+
+## Changed in v0.3.0
+
+| Was | Now |
+| --- | --- |
+| `baseURL` / `Options.BaseURL` | removed: set `Config.BaseURL` (`BASE_URL`) or register an origin resolver |
+| `exclude` / `Options.Exclude` | `skip` / `Options.Skip`; `"/api"` now also covers `/api` itself and no longer covers `/apix` |
+| `Options.Window time.Duration` + `WindowString` | `Options.Window collage.Duration`, json `window` |
+| `Options.Backoff` (Go only) | `Options.Backoff collage.Duration`, json `backoff` |
+| `Options.Client` | `Options.HTTPClient` |
+| `DefaultEndpoint` | unexported; the default endpoint is documented on `endpoint` |
+| negative `retries` tries once | negative `retries` or `batchSize` is an error |
+
+A configuration that still has `baseURL` or `exclude` stops the application with
+`unknown key "…"`. `ErrNoBaseURL` now means only "no origin anywhere".
 
 ## Limitations
 
@@ -105,4 +121,4 @@ sends.
 - What is waiting is held in memory: a process killed without a shutdown loses it,
   and each instance of a site running on several sends its own invalidations.
 - A document's path is sent like a page's, a feed or a sitemap included; list the
-  ones a search engine has no use for in `exclude`.
+  ones a search engine has no use for in `skip`.
