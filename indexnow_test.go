@@ -321,13 +321,18 @@ func TestRefusals(t *testing.T) {
 		"backoff number":  {config: `{"backoff":2}`},
 		"batchSize":       {config: `{"batchSize":-1}`},
 		"retries":         {config: `{"retries":-1}`},
+		"skip prefix":     {config: `{"skip":["api"]}`},
 	} {
 		opts := options(e)
 		if c.mutate != nil {
 			c.mutate(&opts)
 		}
-		if _, err := collagetest.TrySite(t, siteOptions(false, opts, c.config)...); err == nil {
+		_, err := collagetest.TrySite(t, siteOptions(false, opts, c.config)...)
+		if err == nil {
 			t.Errorf("%s: the application started", name)
+		}
+		if name == "skip prefix" && (err == nil || !strings.Contains(err.Error(), `indexnow: skip prefix "api" must begin with /`)) {
+			t.Errorf("skip prefix: %v", err)
 		}
 	}
 }

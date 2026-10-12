@@ -90,8 +90,9 @@ missing or malformed, or when there is no `Config.BaseURL` and no origin resolve
 `endpoint` may be a search engine's own — `https://www.bing.com/indexnow` — which
 shares with the rest the same way. `window` and `backoff` are duration strings
 (`"10s"`); a bare number, or a negative one, stops the application. `skip` lists
-request path prefixes never sent; a prefix covers the path and everything under it,
-with or without a trailing `/`. `batchSize` and `retries` take 0 for their default,
+request path prefixes never sent; each begins with `/` (anything else stops the
+application), and covers the path and everything under it, with or without a
+trailing `/`. `batchSize` and `retries` take 0 for their default,
 and a negative value stops the application. In Go, `HTTPClient` is the
 `*http.Client` that sends.
 

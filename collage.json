@@ -39,7 +39,7 @@
       },
       "skip": {
         "type": "array",
-        "description": "Skip are request path prefixes never sent: \"/api\", \"/search\". A prefix covers the path itself and everything under it, with or without a trailing \"/\".",
+        "description": "Skip are request path prefixes never sent: \"/api\", \"/search\". Each begins with \"/\", and covers the path itself and everything under it, with or without a trailing \"/\".",
         "items": {
           "type": "string"
         }

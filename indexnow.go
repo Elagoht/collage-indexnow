@@ -78,9 +78,9 @@ type Options struct {
 	// unless the endpoint says otherwise with Retry-After: "2s". Default two
 	// seconds.
 	Backoff collage.Duration `json:"backoff"`
-	// Skip are request path prefixes never sent: "/api", "/search". A prefix
-	// covers the path itself and everything under it, with or without a trailing
-	// "/".
+	// Skip are request path prefixes never sent: "/api", "/search". Each begins
+	// with "/", and covers the path itself and everything under it, with or
+	// without a trailing "/".
 	Skip []string `json:"skip"`
 	// InDevelopment sends from a development server too, which is otherwise
 	// silent: what changes on a laptop is not news to a search engine.
@@ -169,6 +169,11 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 	if o.Retries < 0 {
 		return fmt.Errorf("indexnow: retries %d is negative", o.Retries)
+	}
+	for _, prefix := range o.Skip {
+		if !strings.HasPrefix(prefix, "/") {
+			return fmt.Errorf("indexnow: skip prefix %q must begin with /", prefix)
+		}
 	}
 	if o.Window == 0 {
 		o.Window = collage.Duration(10 * time.Second)
