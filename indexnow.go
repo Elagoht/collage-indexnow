@@ -96,8 +96,8 @@ type Plugin struct {
 	opts    Options
 	log     *slog.Logger
 	enabled bool
-	base    string // the plugin's own BaseURL without its trailing slash; empty when origins decide
-	origins collage.Origins
+	base    string       // the plugin's own BaseURL without its trailing slash; empty when origins decide
+	origins collage.Host // set only when origins decide per host
 	keyPath string
 
 	mu      sync.Mutex
@@ -125,7 +125,7 @@ var (
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.1" }
+func (p *Plugin) Version() string { return "0.2.2" }
 
 // ErrInvalidKey is returned by Init for a missing or malformed key.
 var ErrInvalidKey = errors.New("indexnow: Key must be 8 to 128 letters, digits and dashes")
@@ -156,7 +156,9 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		}
 		p.base = strings.TrimSuffix(o.BaseURL, "/")
 	case canResolve(host):
-		p.origins, _ = host.(collage.Origins)
+		if host.MultiOrigin() {
+			p.origins = host
+		}
 		if p.origins == nil {
 			// A host that cannot resolve per host still knows Config.BaseURL.
 			p.base = host.BaseURL()
@@ -215,8 +217,7 @@ func canResolve(host collage.Host) bool {
 	if host.BaseURL() != "" {
 		return true
 	}
-	origins, ok := host.(collage.Origins)
-	return ok && origins.Dynamic()
+	return host.MultiOrigin()
 }
 
 // OnCacheInvalidate queues the URLs the invalidation dropped, and returns: the

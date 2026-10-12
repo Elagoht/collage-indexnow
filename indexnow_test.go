@@ -113,13 +113,13 @@ func site(t *testing.T, dev bool, opts indexnow.Options, config map[string]json.
 	}
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
 		page := collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).
-			WithPath("en", "/"+name).Static().WithDependency("posts", "tag-"+name).Build()
+			WithPath("en", "/"+name).Static().WithDependencyTags("posts", "tag-"+name).Build()
 		if err := app.RegisterPage(page); err != nil {
 			t.Fatal(err)
 		}
 	}
 	api := collage.NewPage("api").WithContent(collage.NewFragment("api", "p.html").Build()).
-		WithPath("en", "/api/x").Static().WithDependency("posts").Build()
+		WithPath("en", "/api/x").Static().WithDependencyTags("posts").Build()
 	if err := app.RegisterPage(api); err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +182,7 @@ func TestKeyFile(t *testing.T) {
 
 	// A static build writes it too.
 	out := t.TempDir()
-	b, err := collage.NewBuilder(site(t, false, options(newEndpoint(t)), nil), collage.BuildOptions{OutDir: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Build(context.Background()); err != nil {
+	if _, err := collage.Build(context.Background(), site(t, false, options(newEndpoint(t)), nil), collage.BuildOptions{OutDir: out}); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(filepath.Join(out, key+".txt")); err != nil || string(body) != key {
@@ -326,7 +322,7 @@ func TestIndexNow_FallsBackToConfigBaseURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
-		WithPath("en", "/a").Static().WithDependency("posts", "tag-a").Build()
+		WithPath("en", "/a").Static().WithDependencyTags("posts", "tag-a").Build()
 	if err := app.RegisterPage(page); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +400,7 @@ func TestSubmission_PerOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := collage.NewPage("a").WithContent(collage.NewFragment("a", "p.html").Build()).
-		WithPath("en", "/a").Static().WithDependency("posts").Build()
+		WithPath("en", "/a").Static().WithDependencyTags("posts").Build()
 	if err := app.RegisterPage(page); err != nil {
 		t.Fatal(err)
 	}
